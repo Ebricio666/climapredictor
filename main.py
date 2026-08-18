@@ -2785,30 +2785,93 @@ elif seccion == "Análisis con Prophet":
         import streamlit as st
 
         # --- Cargar o procesar df_consolidado_imputado ---
-        if os.path.exists("df_consolidado_procesado.csv") and not st.button("Forzar reprocesamiento"):
-            st.success("Datos cargados desde archivo.")
-            df_consolidado_imputado = pd.read_csv("df_consolidado_procesado.csv", parse_dates=["Fecha"])
-        else:
+        # Un archivo cacheado creado por una versión anterior puede no contener
+        # la columna Clave. En ese caso se descarta y se reconstruye.
+        forzar_reproceso = st.button("Forzar reprocesamiento")
+        usar_cache = False
+
+        if os.path.exists("df_consolidado_procesado.csv") and not forzar_reproceso:
+            try:
+                df_cache = pd.read_csv("df_consolidado_procesado.csv")
+                columnas_minimas = {'Clave', 'Fecha', 'Latitud', 'Longitud'}
+                if columnas_minimas.issubset(df_cache.columns):
+                    df_cache['Clave'] = df_cache['Clave'].astype(str)
+                    df_cache['Fecha'] = pd.to_datetime(df_cache['Fecha'], errors='coerce')
+                    df_consolidado_imputado = df_cache
+                    usar_cache = True
+                    st.success("Datos cargados desde archivo.")
+                else:
+                    faltantes = columnas_minimas.difference(df_cache.columns)
+                    st.warning(
+                        "El archivo procesado pertenece a una versión anterior "
+                        f"y le faltan columnas ({', '.join(sorted(faltantes))}). Se reconstruirá automáticamente."
+                    )
+            except Exception as e:
+                st.warning(f"No fue posible reutilizar el archivo procesado; se reconstruirá. Detalle: {e}")
+
+        if not usar_cache:
             st.warning("Procesando datos desde cero...")
 
-            # Aquí insertas tu código para recolectar, consolidar e imputar
             coordenadas_estaciones = recolectar_coordenadas_nombres(claves, output_dirs)
             df_consolidado = consolidar_datos_estaciones(claves, output_dirs, elevation_data, tile_size)
-            df_consolidado = df_consolidado.sort_values(by=['Clave', 'Año', 'Mes'])
-            df_consolidado_interpolado = df_consolidado.groupby('Clave').apply(
-                lambda group: group.interpolate(method='linear', limit_direction='forward', axis=0)
-            )
 
-            coordenadas = df_consolidado[['Latitud', 'Longitud']].dropna().values
+            if df_consolidado.empty:
+                raise ValueError("No se pudieron consolidar datos de las estaciones.")
+            if 'Clave' not in df_consolidado.columns:
+                raise ValueError("Los datos consolidados no contienen la columna 'Clave'.")
+
+            df_consolidado['Clave'] = df_consolidado['Clave'].astype(str)
+            df_consolidado = df_consolidado.sort_values(by=['Clave', 'Año', 'Mes']).reset_index(drop=True)
+
+            # Interpolación temporal por estación SIN groupby.apply.
+            # En versiones recientes de pandas, groupby.apply puede eliminar
+            # la columna usada para agrupar ('Clave'), provocando KeyError: 'Clave'.
+            df_consolidado_interpolado = df_consolidado.copy()
+            columnas_no_interpolar = {'Clave', 'Fecha', 'Latitud', 'Longitud', 'Año', 'Mes'}
+            columnas_numericas = [
+                c for c in df_consolidado_interpolado.select_dtypes(include=[np.number]).columns
+                if c not in columnas_no_interpolar
+            ]
+            for col in columnas_numericas:
+                df_consolidado_interpolado[col] = (
+                    df_consolidado_interpolado.groupby('Clave', sort=False)[col]
+                    .transform(lambda serie: serie.interpolate(method='linear', limit_direction='both'))
+                )
+
+            # Imputación geoespacial: el KDTree debe construirse sobre filas con
+            # coordenadas válidas y usar ese mismo subconjunto para conservar
+            # la correspondencia entre índices y vecinos.
+            df_geo = df_consolidado_interpolado.dropna(subset=['Latitud', 'Longitud']).copy().reset_index(drop=True)
+            if df_geo.empty:
+                raise ValueError("No hay coordenadas válidas para realizar la imputación geoespacial.")
+
+            coordenadas = df_geo[['Latitud', 'Longitud']].to_numpy()
             tree = cKDTree(coordenadas)
-            columnas_imputar = ['Temperatura Media(ºC)', 'Temperatura Máxima(ºC)',
-                        'Temperatura Mínima(ºC)', 'Precipitación(mm)']
+            columnas_imputar = [
+                'Temperatura Media(ºC)', 'Temperatura Máxima(ºC)',
+                'Temperatura Mínima(ºC)', 'Precipitación(mm)'
+            ]
+            columnas_imputar = [c for c in columnas_imputar if c in df_geo.columns]
 
-            df_consolidado_imputado = df_consolidado_interpolado.apply(
-                lambda row: imputar_geoespacial(row, columnas_imputar, df_consolidado_interpolado, tree),
+            # k nunca debe superar el número de registros disponibles.
+            k_vecinos = min(3, len(df_geo))
+            df_geo = df_geo.apply(
+                lambda row: imputar_geoespacial(
+                    row, columnas_imputar, df_geo, tree, k=k_vecinos
+                ),
                 axis=1
             )
-            df_consolidado_imputado
+
+            # Conservar también filas que pudieran carecer de coordenadas.
+            sin_coord = df_consolidado_interpolado[
+                df_consolidado_interpolado[['Latitud', 'Longitud']].isna().any(axis=1)
+            ].copy()
+            df_consolidado_imputado = pd.concat([df_geo, sin_coord], ignore_index=True, sort=False)
+            df_consolidado_imputado['Clave'] = df_consolidado_imputado['Clave'].astype(str)
+            df_consolidado_imputado = df_consolidado_imputado.sort_values(
+                by=['Clave', 'Año', 'Mes'], na_position='last'
+            ).reset_index(drop=True)
+
             df_consolidado_imputado.to_csv("df_consolidado_procesado.csv", index=False)
             st.success("Datos procesados y guardados.")
 
