@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+requests
+scipy
+plotly
+matplotlib
+prophet
+statsmodels
+seaborn
