@@ -2471,9 +2471,22 @@ elif seccion == "Análisis con Prophet":
     import numpy as np
     from scipy.spatial import cKDTree
     import streamlit as st
-    output_dirs = st.session_state.output_dirs
-    elevation_data = st.session_state.elevation_data
-    tile_size = st.session_state.tile_size
+    # Estas variables antes se creaban únicamente al entrar en
+    # "Mapas Climatológicos". Streamlit vuelve a ejecutar el script completo
+    # cuando se cambia de sección, por lo que al abrir Prophet directamente
+    # las claves podían no existir en session_state.
+    output_dirs = st.session_state.get(
+        "output_dirs",
+        ["datos_estaciones_colima", "datos_estaciones_cerca_colima"]
+    )
+    st.session_state.output_dirs = output_dirs
+
+    # Elevación es necesaria para las variables de radiación solar, pero NO
+    # para Prophet con temperatura, precipitación o evaporación. La cargamos
+    # de forma segura para que esas predicciones puedan funcionar aunque el
+    # usuario no haya visitado antes la sección de mapas.
+    elevation_data = st.session_state.get("elevation_data", None)
+    tile_size = st.session_state.get("tile_size", None)
 
     @st.cache_data
     def obtener_elevacion(lat, lon, tile_size, elevation_data):
@@ -2481,6 +2494,11 @@ elif seccion == "Análisis con Prophet":
         Obtiene la elevación en kilómetros desde el archivo ACE2 usando latitud y longitud.
         """
         try:
+            # La elevación es opcional en Prophet cuando se trabaja con
+            # temperatura, precipitación o evaporación.
+            if elevation_data is None or tile_size is None:
+                return np.nan
+
             # Validar dimensiones de tile_size con elevation_data
             if elevation_data.shape != tile_size:
                 raise ValueError(f"Las dimensiones de elevation_data {elevation_data.shape} no coinciden con tile_size {tile_size}")
@@ -2818,9 +2836,15 @@ elif seccion == "Análisis con Prophet":
             #variables_disponibles = ['Temperatura Media(ºC)', 'Temperatura Máxima(ºC)', 'Temperatura Mínima(ºC)', 'Precipitación(mm)', 'Evaporación(mm)']
             variables_disponibles = [
                 'Temperatura Media(ºC)', 'Temperatura Máxima(ºC)', 'Temperatura Mínima(ºC)',
-                'Precipitación(mm)', 'Evaporación(mm)',
-                'Radiación Solar Promedio (W/m²)', 'Radiación Solar Corregida (W/m²)'
-    ]
+                'Precipitación(mm)', 'Evaporación(mm)'
+            ]
+            # Las variables de radiación requieren que el raster de elevación
+            # haya sido cargado. Si ya existe en session_state, se habilitan.
+            if elevation_data is not None and tile_size is not None:
+                variables_disponibles += [
+                    'Radiación Solar Promedio (W/m²)',
+                    'Radiación Solar Corregida (W/m²)'
+                ]
 
             estacion_seleccionada = st.selectbox("Selecciona una estación", estaciones_disponibles)
             variable_seleccionada = st.selectbox("Selecciona una variable climática", variables_disponibles)
